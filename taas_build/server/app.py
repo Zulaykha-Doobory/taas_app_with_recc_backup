@@ -598,6 +598,8 @@ tr:hover td{background:var(--panel);}
   <button class="tab" onclick="showTab('live')">Live site</button>
   <button class="tab" onclick="showTab('upload')">&#8679; Upload file</button>
   <button class="tab" onclick="showTab('ai')">&#10024; AI Generate</button>
+  <button class="tab" onclick="showTab('recording')">&#128249; Recording</button>
+  <button class="tab" onclick="showTab('bugs')">&#128027; Bug Reports</button>
 </div>
 
 <!-- DEMO TAB -->
@@ -659,6 +661,28 @@ Valid login,happy_path,,assert_text,css,.flash,,You logged into</div>
   </div>
 </div>
 
+<!-- RECORDING TAB -->
+<div class="panel" id="tab-recording">
+  <p style="color:var(--muted);font-size:13px;margin:0 0 8px">Record the screen while a test runs, then stop it. Videos save to the <b>recordings</b> folder.</p>
+  <p style="color:var(--text);font-size:13px;margin:0 0 14px">Video capture needs <b>FFmpeg</b> installed. Without it, everything still works — the video just won't be saved.</p>
+  <div class="urlbar">
+    <input type="text" id="rec-id" placeholder="Run ID (leave blank to auto-generate)">
+    <button class="btn" onclick="recStart()">&#9654; Start Recording</button>
+    <button class="btn sec" onclick="recStop()">&#9632; Stop Recording</button>
+  </div>
+  <div class="tmpl" id="rec-out" style="margin-top:14px">No recording yet.</div>
+</div>
+
+<!-- BUG REPORTS TAB -->
+<div class="panel" id="tab-bugs">
+  <p style="color:var(--muted);font-size:13px;margin:0 0 14px">View bug reports automatically created when tests fail. Enter a Run ID to load its reports.</p>
+  <div class="urlbar">
+    <input type="text" id="bug-id" placeholder="Run ID (e.g. abc123)">
+    <button class="btn" onclick="bugLoad()">Get Bug Reports</button>
+  </div>
+  <div class="tmpl" id="bug-out" style="margin-top:14px">No reports loaded.</div>
+</div>
+
 <!-- RESULTS -->
 <div id="results" style="margin-top:20px"></div>
 </main>
@@ -670,6 +694,30 @@ function showTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.getElementById('tab-'+name).classList.add('show');
   event.target.classList.add('active');
+}
+
+// ---- recording + bug reports ----------------------------------------
+let _recRunId = '';
+function recStart(){
+  let id = document.getElementById('rec-id').value || Math.random().toString(36).substr(2,8);
+  _recRunId = id;
+  document.getElementById('rec-id').value = id;
+  fetch('/runs/'+id+'/recording/start',{method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{document.getElementById('rec-out').textContent = JSON.stringify(d,null,2);});
+}
+function recStop(){
+  if(!_recRunId){ document.getElementById('rec-out').textContent='Start a recording first.'; return; }
+  fetch('/runs/'+_recRunId+'/recording/stop',{method:'POST'})
+    .then(r=>r.json())
+    .then(d=>{document.getElementById('rec-out').textContent = JSON.stringify(d,null,2);});
+}
+function bugLoad(){
+  let id = document.getElementById('bug-id').value;
+  if(!id){ document.getElementById('bug-out').textContent='Enter a Run ID.'; return; }
+  fetch('/runs/'+id+'/bug-reports')
+    .then(r=>r.json())
+    .then(d=>{document.getElementById('bug-out').textContent = JSON.stringify(d,null,2);});
 }
 
 // ---- boot -----------------------------------------------------------
@@ -831,6 +879,96 @@ function renderResults(d){
 }
 </script>
 </body></html>"""
+
+# ============================================================================
+# VIDEO RECORDING & BUG REPORTS (added feature)
+# ============================================================================
+import json as _json, subprocess as _sp, platform as _plat
+from pathlib import Path as _Path
+from datetime import datetime as _dt
+
+class _ScreenRecorder:
+    """Records the screen during a test run using FFmpeg (optional)."""
+    def __init__(self, output_dir="./recordings", fps=15):
+        self.dir = _Path(output_dir); self.dir.mkdir(parents=True, exist_ok=True)
+        self.fps = fps; self.proc = None; self.file = None; self.on = False
+    def start(self, name):
+        ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+        safe = "".join(c for c in name if c.isalnum() or c in "-_").lower()
+        self.file = self.dir / f"{safe}_{ts}.mp4"
+        sysname = _plat.system()
+        if sysname == "Windows":
+            cmd = ["ffmpeg","-f","gdigrab","-framerate",str(self.fps),"-i","desktop","-c:v","libx264","-preset","ultrafast","-crf","28","-y",str(self.file)]
+        elif sysname == "Darwin":
+            cmd = ["ffmpeg","-f","avfoundation","-framerate",str(self.fps),"-i","1","-c:v","libx264","-preset","ultrafast","-crf","28","-y",str(self.file)]
+        else:
+            cmd = ["ffmpeg","-f","x11grab","-framerate",str(self.fps),"-i",":0.0","-c:v","libx264","-preset","ultrafast","-crf","28","-y",str(self.file)]
+        try:
+            self.proc = _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            self.on = True
+            return str(self.file)
+        except FileNotFoundError:
+            self.on = False
+            return None
+    def stop(self):
+        if not self.on or not self.proc: return None
+        try:
+            self.proc.terminate(); self.proc.wait(timeout=10); self.on = False
+            if self.file.exists() and self.file.stat().st_size > 0: return str(self.file)
+            return None
+        except Exception:
+            return None
+
+class _BugReports:
+    """Creates and lists JSON bug reports for failed tests."""
+    def __init__(self, output_dir="./output"):
+        self.dir = _Path(output_dir); self.dir.mkdir(parents=True, exist_ok=True)
+    def create(self, test_name, failure_reason, expected, actual, video_path=None, run_id=None):
+        r = {
+            "id": f"BUG-{run_id}-{(test_name or 'test').replace(' ', '_').lower()}",
+            "test_name": test_name, "timestamp": _dt.now().isoformat(), "status": "NEW",
+            "title": f"[AUTOMATED] {test_name} failed: {failure_reason}",
+            "failure_reason": failure_reason, "expected": expected, "actual": actual,
+            "environment": {"os": _plat.system()},
+            "artifacts": {"video": f"./recordings/{_Path(video_path).name}" if video_path else None},
+            "jira_issue_key": None,
+        }
+        with open(self.dir / f"{r['id']}.json", "w") as f: _json.dump(r, f, indent=2)
+        return r
+    def list(self, run_id):
+        out = []
+        for fp in self.dir.glob(f"BUG-{run_id}-*.json"):
+            with open(fp) as f: out.append(_json.load(f))
+        return out
+
+_recorder = _ScreenRecorder()
+_bugs = _BugReports()
+_active_runs: Dict[str, Any] = {}
+
+@app.post("/runs/{run_id}/recording/start")
+def rec_start(run_id: str, suite_name: str = "test_suite"):
+    vp = _recorder.start(f"{suite_name}_{run_id}")
+    _active_runs[run_id] = {"video_path": vp}
+    return {"run_id": run_id, "recording_started": bool(vp), "video_path": vp,
+            "note": None if vp else "FFmpeg not installed — recording skipped. Install FFmpeg to capture video."}
+
+@app.post("/runs/{run_id}/recording/stop")
+def rec_stop(run_id: str):
+    fp = _recorder.stop()
+    if run_id in _active_runs: _active_runs[run_id]["final_path"] = fp
+    return {"run_id": run_id, "recording_stopped": True, "video_path": fp}
+
+@app.post("/runs/{run_id}/bug-report")
+def bug_create(run_id: str, test_data: Dict[str, Any]):
+    vp = _active_runs.get(run_id, {}).get("final_path")
+    return _bugs.create(test_data.get("test_name"), test_data.get("failure_reason"),
+                        test_data.get("expected"), test_data.get("actual"), vp, run_id)
+
+@app.get("/runs/{run_id}/bug-reports")
+def bug_list(run_id: str):
+    reports = _bugs.list(run_id)
+    return {"run_id": run_id, "total_reports": len(reports), "reports": reports}
+
 
 if __name__ == "__main__":
     import uvicorn
