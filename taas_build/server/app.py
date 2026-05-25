@@ -56,7 +56,7 @@ runner = SimulationRunner()
 
 # Ollama AI generator — connects to local Ollama instance.
 # Change model to "llama3.2:3b" for slower machines, "qwen2.5-coder:14b" for fast ones.
-ollama_ai = OllamaAIGenerator(model="qwen2.5-coder:7b")
+ollama_ai = OllamaAIGenerator(model="llama3.2:3b")
 
 # In-memory run history (Postgres in production).
 RUN_HISTORY: List[Dict[str, Any]] = []
@@ -436,30 +436,100 @@ async def upload_and_run(file: UploadFile = File(...)):
 
 class AiGenerateReq(BaseModel):
     url: str
+    record_mode: str = "browser"   # "browser" | "screen" | "both"
 
 
 @app.post("/ai/generate-and-run")
 def ai_generate_and_run(req: AiGenerateReq):
-    """Use Ollama to analyse a URL, generate test cases, and run them."""
-    if not ollama_ai.is_available():
-        raise HTTPException(status_code=503, detail={
-            "message": "Ollama is not running or model not pulled.",
-            "fix": [
-                "1. Download Ollama: https://ollama.com/download",
-                f"2. Run in terminal: ollama pull {ollama_ai.model}",
-                "3. Try again — Ollama starts automatically.",
-            ],
-            "available_models": ollama_ai.list_models(),
-        })
+    """
+    Paste ANY url -> generate tests from the page -> run them in a REAL
+    Chrome browser -> record the run -> auto-create bug reports for failures.
+
+    Test generation uses the page structure (works with no Ollama). If Ollama
+    is running, it's used automatically for richer tests. Browser execution
+    falls back to simulation if Selenium/Chrome isn't installed.
+    """
+    import uuid as _uuid
+    from taas.ai.smart_url import SmartURLGenerator
+
+    # 1. Generate a suite from the URL (structure-based, Ollama if available)
     try:
-        cases = ollama_ai.generate_for_url(req.url)
+        gen = SmartURLGenerator(use_ollama_if_available=True)
+        suite = gen.generate_suite(req.url)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    base = "/".join(req.url.split("/")[:3])
-    suite = TestSuite(suite_name=f"AI: {req.url}", base_url=base, cases=cases)
-    result = runner.run_suite(suite, target_url=req.url).to_dict()
+        raise HTTPException(status_code=400, detail={
+            "message": f"Could not read that URL: {str(e)[:160]}",
+            "hint": "Check the URL is correct and publicly reachable.",
+        })
+
+    if not suite.cases:
+        raise HTTPException(status_code=422, detail={
+            "message": "No testable elements found on that page.",
+            "hint": "Try a page with a form, login, or buttons.",
+        })
+
+    SeleniumTranslator().render_suite(suite)
+    run_id = _uuid.uuid4().hex[:8]
+
+    want_browser = req.record_mode in ("browser", "both")
+    want_screen = req.record_mode in ("screen", "both")
+    screen_rec = _recorder.start(f"ai_screen_{run_id}") if want_screen else None
+
+    # 3. run in a REAL browser, fall back to simulation if unavailable
+    used_runner = "selenium"
+    note = None
+    video_path = None        # browser-only video
+    screen_video = None      # full-desktop video
+    try:
+        from taas.execute.runner import (SeleniumRunner, stitch_frames_to_video,
+                                         clear_frames)
+        frames_dir = f"./recordings/frames_{run_id}"
+        if want_browser:
+            clear_frames(frames_dir)
+        live_runner = SeleniumRunner(headless=False, capture_frames=want_browser,
+                                     frames_dir=frames_dir)
+        _probe = live_runner._make_driver(); _probe.quit()
+        run = live_runner.run_suite(suite, target_url=req.url)
+        if want_browser:
+            out_mp4 = f"./recordings/ai_{run_id}.mp4"
+            video_path = stitch_frames_to_video(frames_dir, out_mp4, fps=8)
+    except Exception as e:
+        used_runner = "simulation (fallback)"
+        note = ("Real browser unavailable, used simulation. Install Selenium + "
+                f"Chrome to run real browser tests. Detail: {str(e)[:100]}")
+        run = runner.run_suite(suite, target_url=req.url)
+
+    if screen_rec:
+        screen_video = _recorder.stop()
+
+    result = run.to_dict()
+    _active_runs[run_id] = {"final_path": video_path or screen_video}
+
+    # 5. auto bug reports for failures
+    bug_reports = []
+    for case in result["cases"]:
+        if case["status"] in ("failed", "error"):
+            bug_reports.append(_bugs.create(
+                test_name=case["name"],
+                failure_reason=case.get("failure_reason") or "Test failed",
+                expected="Test should pass", actual=case.get("failure_reason") or "Failed",
+                video_path=video_path or screen_video, run_id=run_id))
+
+    result["run_id"] = run_id
+    result["video_path"] = video_path
+    result["screen_video"] = screen_video
+    result["record_mode"] = req.record_mode
+    result["bug_reports"] = bug_reports
+    result["used_runner"] = used_runner
+    result["generated_by"] = suite.metadata.get("generated_by", "structure")
+    result["test_count"] = len(suite.cases)
+    if note:
+        result["note"] = note
+
     RUN_HISTORY.insert(0, {"id": len(RUN_HISTORY)+1, "suite_name": result["suite_name"],
-                           "started_at": result["started_at"], "summary": result["summary"]})
+                           "started_at": result["started_at"], "summary": result["summary"],
+                           "run_id": run_id, "video_path": video_path,
+                           "bug_count": len(bug_reports)})
     return result
 
 
@@ -471,16 +541,95 @@ def ai_status():
             "install_url": "https://ollama.com/download"}
 
 @app.post("/run/live")
-def run_live():
-    """Run the real test suite against the-internet.herokuapp.com."""
+def run_live(record: bool = True, headless: bool = False,
+             record_mode: str = "browser"):
+    """
+    Run the real test suite against the-internet.herokuapp.com using a REAL
+    Chrome browser (Selenium). Automatically generates a hidden run_id, runs
+    each step, records, flags failures as bug reports.
+
+    record_mode:
+      "browser" (default) -> records only the browser (works minimized/background)
+      "screen"            -> records the whole desktop with FFmpeg
+      "both"              -> produces both videos
+    Returns results + video path(s) + bug reports, linked by run_id.
+    Falls back to simulation if Selenium/Chrome isn't installed.
+    """
+    import uuid as _uuid
     suite = _build_live_suite()
     SeleniumTranslator().render_suite(suite)
-    result = runner.run_suite(suite, target_url=TARGET).to_dict()
+
+    run_id = _uuid.uuid4().hex[:8]
+    want_browser = record and record_mode in ("browser", "both")
+    want_screen = record and record_mode in ("screen", "both")
+
+    # optionally start whole-desktop recording
+    screen_rec = _recorder.start(f"live_screen_{run_id}") if want_screen else None
+
+    used_runner = "selenium"
+    fallback_note = None
+    video_path = None        # browser-only video
+    screen_video = None      # full-screen video
+    try:
+        from taas.execute.runner import (SeleniumRunner, stitch_frames_to_video,
+                                         clear_frames)
+        frames_dir = f"./recordings/frames_{run_id}"
+        if want_browser:
+            clear_frames(frames_dir)
+        live_runner = SeleniumRunner(headless=headless, capture_frames=want_browser,
+                                     frames_dir=frames_dir)
+        _probe = live_runner._make_driver()
+        _probe.quit()
+        run = live_runner.run_suite(suite, target_url=TARGET)
+        if want_browser:
+            out_mp4 = f"./recordings/live_{run_id}.mp4"
+            video_path = stitch_frames_to_video(frames_dir, out_mp4, fps=8)
+    except Exception as e:
+        # Selenium or Chrome not installed -> graceful fallback
+        used_runner = "simulation (fallback)"
+        fallback_note = ("Real browser unavailable, used simulation instead. "
+                         "Install Selenium + Chrome to record real runs. "
+                         f"Detail: {str(e)[:120]}")
+        run = runner.run_suite(suite, target_url=TARGET)
+
+    # stop the desktop recording if it was running
+    if screen_rec:
+        screen_video = _recorder.stop()
+
+    result = run.to_dict()
+    _active_runs[run_id] = {"final_path": video_path or screen_video}
+
+    # 4: auto-create bug reports for every failed/errored case
+    bug_reports = []
+    for case in result["cases"]:
+        if case["status"] in ("failed", "error"):
+            br = _bugs.create(
+                test_name=case["name"],
+                failure_reason=case.get("failure_reason") or "Test failed",
+                expected="Test should pass",
+                actual=case.get("failure_reason") or "Failed",
+                video_path=video_path or screen_video,
+                run_id=run_id,
+            )
+            bug_reports.append(br)
+
+    result["run_id"] = run_id
+    result["video_path"] = video_path
+    result["screen_video"] = screen_video
+    result["record_mode"] = record_mode
+    result["bug_reports"] = bug_reports
+    result["used_runner"] = used_runner
+    if fallback_note:
+        result["note"] = fallback_note
+
     RUN_HISTORY.insert(0, {
         "id": len(RUN_HISTORY) + 1,
         "suite_name": result["suite_name"],
         "started_at": result["started_at"],
         "summary": result["summary"],
+        "run_id": run_id,
+        "video_path": video_path,
+        "bug_count": len(bug_reports),
     })
     return result
 
@@ -648,9 +797,14 @@ Valid login,happy_path,,assert_text,css,.flash,,You logged into</div>
        style="color:var(--accent);font-size:12px;margin-left:auto;">Get Ollama ↗</a>
   </div>
   <p style="color:var(--muted);font-size:13px;margin:0 0 12px">
-    Paste any website URL. The AI will read the page structure and generate test cases automatically.</p>
+    Paste any website URL. TaaS reads the page, generates test cases, and runs them in a <b>real Chrome browser</b> while recording. Failures become bug reports automatically. <br><span style="font-size:12px">Works without Ollama; if Ollama is running it's used for richer tests.</span></p>
   <div class="urlbar">
     <input type="text" id="ai-url" placeholder="https://the-internet.herokuapp.com/login" value="https://the-internet.herokuapp.com/login">
+    <select id="ai-recmode" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:0 10px;">
+      <option value="browser">Record: browser only</option>
+      <option value="screen">Record: full screen</option>
+      <option value="both">Record: both</option>
+    </select>
     <button class="btn" id="go-ai" onclick="runAI()">&#10024; Generate &amp; Run</button>
   </div>
   <div id="ai-setup" style="display:none">
@@ -765,11 +919,12 @@ async function runLive(){
 async function runAI(){
   const url=document.getElementById('ai-url').value.trim();
   if(!url){alert('Please enter a URL.');return;}
+  const recmode=document.getElementById('ai-recmode').value;
   document.getElementById('go-ai').dataset.label='✨ Generate & Run';
   document.getElementById('go-ai').disabled=true;
   document.getElementById('go-ai').textContent='Generating… (this takes 30-90s)';
   document.getElementById('ai-setup').style.display='none';
-  await doRun('/ai/generate-and-run',{url});
+  await doRun('/ai/generate-and-run',{url, record_mode:recmode});
   document.getElementById('go-ai').disabled=false;
   document.getElementById('go-ai').textContent='✨ Generate & Run';
 }
@@ -897,14 +1052,16 @@ class _ScreenRecorder:
         safe = "".join(c for c in name if c.isalnum() or c in "-_").lower()
         self.file = self.dir / f"{safe}_{ts}.mp4"
         sysname = _plat.system()
+        # -movflags +faststart writes the MP4 index so the file plays even if cut short
         if sysname == "Windows":
-            cmd = ["ffmpeg","-f","gdigrab","-framerate",str(self.fps),"-i","desktop","-c:v","libx264","-preset","ultrafast","-crf","28","-y",str(self.file)]
+            cmd = ["ffmpeg","-f","gdigrab","-framerate",str(self.fps),"-i","desktop","-c:v","libx264","-pix_fmt","yuv420p","-preset","ultrafast","-crf","28","-movflags","+faststart","-y",str(self.file)]
         elif sysname == "Darwin":
-            cmd = ["ffmpeg","-f","avfoundation","-framerate",str(self.fps),"-i","1","-c:v","libx264","-preset","ultrafast","-crf","28","-y",str(self.file)]
+            cmd = ["ffmpeg","-f","avfoundation","-framerate",str(self.fps),"-i","1","-c:v","libx264","-pix_fmt","yuv420p","-preset","ultrafast","-crf","28","-movflags","+faststart","-y",str(self.file)]
         else:
-            cmd = ["ffmpeg","-f","x11grab","-framerate",str(self.fps),"-i",":0.0","-c:v","libx264","-preset","ultrafast","-crf","28","-y",str(self.file)]
+            cmd = ["ffmpeg","-f","x11grab","-framerate",str(self.fps),"-i",":0.0","-c:v","libx264","-pix_fmt","yuv420p","-preset","ultrafast","-crf","28","-movflags","+faststart","-y",str(self.file)]
         try:
-            self.proc = _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            # stdin=PIPE so we can send 'q' to quit FFmpeg gracefully (finalizes the file)
+            self.proc = _sp.Popen(cmd, stdin=_sp.PIPE, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
             self.on = True
             return str(self.file)
         except FileNotFoundError:
@@ -913,8 +1070,19 @@ class _ScreenRecorder:
     def stop(self):
         if not self.on or not self.proc: return None
         try:
-            self.proc.terminate(); self.proc.wait(timeout=10); self.on = False
-            if self.file.exists() and self.file.stat().st_size > 0: return str(self.file)
+            # Send 'q' to FFmpeg's stdin — this tells it to stop and write the MP4 trailer.
+            # This is the key to a playable file; terminate()/kill() leaves it corrupt.
+            try:
+                self.proc.communicate(input=b"q", timeout=15)
+            except Exception:
+                # Fallback: ask nicely, then force if it won't stop
+                try:
+                    self.proc.terminate(); self.proc.wait(timeout=10)
+                except Exception:
+                    self.proc.kill()
+            self.on = False
+            if self.file.exists() and self.file.stat().st_size > 1000:
+                return str(self.file)
             return None
         except Exception:
             return None

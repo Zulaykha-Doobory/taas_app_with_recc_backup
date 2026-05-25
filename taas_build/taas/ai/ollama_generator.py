@@ -14,13 +14,13 @@ Why feed structure not raw HTML?
   comfortably within context — and the LLM produces dramatically better tests.
 
 Supported models (set in OllamaAIGenerator constructor):
-  qwen2.5-coder:7b   — best code/test quality, needs ~8GB RAM (recommended)
+  llama3.2:3b   — best code/test quality, needs ~8GB RAM (recommended)
   llama3.2:3b        — fastest, works on any machine, ~4GB RAM
   mistral:7b         — good general quality
   codellama:7b       — alternative code model
 
 Install Ollama: https://ollama.com/download
-Then: ollama pull qwen2.5-coder:7b
+Then: ollama pull llama3.2:3b
 """
 from __future__ import annotations
 
@@ -210,18 +210,18 @@ class OllamaAIGenerator:
     Generate test cases for any URL using a local Ollama model.
 
     Usage:
-        gen = OllamaAIGenerator()          # uses qwen2.5-coder:7b
+        gen = OllamaAIGenerator()          # uses llama3.2:3b
         cases = gen.generate_for_url("https://example.com/login")
 
     Requirements:
         1. Install Ollama: https://ollama.com/download
-        2. Pull a model: ollama pull qwen2.5-coder:7b
+        2. Pull a model: ollama pull llama3.2:3b
         3. Make sure Ollama is running (it starts automatically on Windows)
     """
 
     def __init__(
         self,
-        model: str = "qwen2.5-coder:7b",
+        model: str = "llama3.2:3b",
         host: str = "http://localhost:11434",
         timeout: int = 120,
     ):
