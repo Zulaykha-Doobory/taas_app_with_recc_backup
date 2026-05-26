@@ -1269,20 +1269,25 @@ def ai_generate_from_requirement(req: RequirementReq):
         # e.g. "Jira not configured" or API error — surface cleanly
         raise HTTPException(status_code=400, detail={"message": str(e)})
 
-    # 2. Get the EXISTING tests for this URL (structure baseline) so the gap
-    #    analysis has something to compare the requirement against.
+    # 2. Read the REAL page structure (forms, buttons, links) so generated
+    #    tests are grounded in elements that actually exist on the page.
+    page_struct = {}
+    existing_cases = []
     try:
-        existing_suite = SmartURLGenerator(use_ollama_if_available=False)\
-            .generate_suite(req.url)
-        existing_cases = existing_suite.cases
+        from taas.ai.smart_url import extract_structure
+        page_struct = extract_structure(req.url)
+        page_struct["url"] = req.url
     except Exception:
-        existing_cases = []
+        page_struct = {"url": req.url}
 
-    # 3. Gap analysis: requirement vs existing tests -> missing tests + coverage
-    gap = GapAnalysisEngine(use_ollama=True).analyze(requirement, existing_cases)
+    # 3. Gap analysis: requirement vs page -> requirement-driven tests + coverage
+    gap = GapAnalysisEngine(use_ollama=True).analyze(
+        requirement, existing_cases, page_struct)
 
-    # 4. The suite to run = existing baseline + AI-generated missing tests
-    all_cases = list(existing_cases) + list(gap.get("missing_cases", []))
+    # 4. Requirement-driven tests are PRIMARY. We do NOT mix in generic
+    #    structure tests here, so the requirement genuinely drives the run
+    #    and coverage reflects the requirement (not drowned by generic tests).
+    all_cases = list(gap.get("missing_cases", []))
     from taas.ir.schema import TestSuite
 
     # If nothing runnable was produced (e.g. URL unreachable AND no AI steps),
@@ -1367,6 +1372,7 @@ def ai_generate_from_requirement(req: RequirementReq):
         "covered": gap.get("covered", []),
         "gaps": gap.get("gaps", []),
         "gap_analyzed_by": gap.get("analyzed_by"),
+        "read_via": page_struct.get("read_via", "fetch"),
         "test_count": len(all_cases),
     })
     if note:

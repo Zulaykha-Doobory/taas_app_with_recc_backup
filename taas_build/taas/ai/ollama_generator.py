@@ -14,13 +14,13 @@ Why feed structure not raw HTML?
   comfortably within context — and the LLM produces dramatically better tests.
 
 Supported models (set in OllamaAIGenerator constructor):
-  llama3.2:3b   — best code/test quality, needs ~8GB RAM (recommended)
+  qwen2.5-coder:7b   — best code/test quality, needs ~8GB RAM (recommended)
   llama3.2:3b        — fastest, works on any machine, ~4GB RAM
   mistral:7b         — good general quality
   codellama:7b       — alternative code model
 
 Install Ollama: https://ollama.com/download
-Then: ollama pull llama3.2:3b
+Then: ollama pull qwen2.5-coder:7b
 """
 from __future__ import annotations
 
@@ -78,7 +78,10 @@ class _StructureExtractor(HTMLParser):
             self._capture = tag
             self._capture_buf = ""
         elif tag == "a":
-            self.links.append({"href": a.get("href", ""), "id": a.get("id", "")})
+            link = {"href": a.get("href", ""), "id": a.get("id", ""), "text": ""}
+            self.links.append(link)
+            self._capture = "a"
+            self._capture_buf = ""
 
     def handle_endtag(self, tag):
         if tag == "form" and self._cur_form is not None:
@@ -86,6 +89,10 @@ class _StructureExtractor(HTMLParser):
             self._cur_form = None
         if tag in ("h1", "h2", "h3") and self._capture:
             self.headings.append(self._capture_buf.strip())
+            self._capture = None
+        if tag == "a" and self._capture == "a":
+            if self.links:
+                self.links[-1]["text"] = self._capture_buf.strip()[:60]
             self._capture = None
 
     def handle_data(self, data):
@@ -210,20 +217,20 @@ class OllamaAIGenerator:
     Generate test cases for any URL using a local Ollama model.
 
     Usage:
-        gen = OllamaAIGenerator()          # uses llama3.2:3b
+        gen = OllamaAIGenerator()          # uses qwen2.5-coder:7b
         cases = gen.generate_for_url("https://example.com/login")
 
     Requirements:
         1. Install Ollama: https://ollama.com/download
-        2. Pull a model: ollama pull llama3.2:3b
+        2. Pull a model: ollama pull qwen2.5-coder:7b
         3. Make sure Ollama is running (it starts automatically on Windows)
     """
 
     def __init__(
         self,
-        model: str = "llama3.2:3b",
+        model: str = "qwen2.5-coder:7b",
         host: str = "http://localhost:11434",
-        timeout: int = 120,
+        timeout: int = 300,
     ):
         self.model = model
         self.host = host

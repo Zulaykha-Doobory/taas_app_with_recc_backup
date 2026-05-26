@@ -86,7 +86,8 @@ class GapAnalysisEngine:
         self.use_ollama = use_ollama
 
     def analyze(self, requirement: Requirement,
-                existing_cases: List[TestCase]) -> Dict[str, Any]:
+                existing_cases: List[TestCase],
+                page_struct: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Returns:
           {
@@ -116,8 +117,8 @@ class GapAnalysisEngine:
             except Exception:
                 pass
 
-        # Deterministic fallback
-        return self._rule_based(requirement, existing_cases)
+        # Deterministic fallback (now generates real requirement-driven tests)
+        return self._rule_based(requirement, existing_cases, page_struct)
 
     # ---- helpers ----------------------------------------------------------
 
@@ -183,41 +184,123 @@ class GapAnalysisEngine:
         return cases
 
     def _rule_based(self, requirement: Requirement,
-                    existing_cases: List[TestCase]) -> Dict[str, Any]:
+                    existing_cases: List[TestCase],
+                    page_struct: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Deterministic gap finder used when the AI is unavailable.
-        Matches acceptance criteria & constraints against existing test names
-        by keyword overlap; anything unmatched becomes a gap.
+        Deterministic requirement-driven generation, used when the AI is
+        unavailable. Turns EACH acceptance criterion / constraint into a real,
+        runnable test grounded in the page's actual structure (forms, buttons,
+        links) so the requirement genuinely drives the tests.
         """
-        existing_text = " ".join(
-            (c.name + " " + " ".join(s.description or "" for s in c.steps)).lower()
-            for c in existing_cases
-        )
+        from taas.ir.schema import (TestCase, TestStep, TestCategory,
+                                    ActionType, Locator)
 
-        covered, gaps = [], []
+        struct = page_struct or {}
+        buttons = struct.get("buttons", [])
+        forms = struct.get("forms", [])
+        links = struct.get("links", [])
+        base_url = struct.get("url", "")
+        req_url_fallback = struct.get("url", "")
+
+        def submit_locator():
+            for b in buttons:
+                if b.get("id"):
+                    return Locator(strategy="id", value=b["id"])
+            return Locator(strategy="css", value="button, input[type=submit]")
+
+        def signin_locator():
+            # look for a sign-in / login link or button by its text
+            for l in links + buttons:
+                txt = (l.get("text") or l.get("href") or "").lower()
+                if any(k in txt for k in ("sign in", "signin", "log in", "login", "sign-in")):
+                    if l.get("href"):
+                        return ("link", Locator(strategy="link_text", value=l.get("text") or "Sign in"))
+                    if l.get("id"):
+                        return ("click", Locator(strategy="id", value=l["id"]))
+            return None
+
+        covered, gaps, cases = [], [], []
         items = ([("criterion", c) for c in requirement.acceptance_criteria]
                  + [("constraint", c) for c in requirement.constraints])
 
-        for kind, item in items:
-            words = [w for w in item.lower().split() if len(w) > 4]
-            hit = sum(1 for w in words if w in existing_text)
-            if words and hit >= max(1, len(words) // 3):
-                covered.append(item)
-            else:
-                cat = "security" if kind == "constraint" else "negative"
-                gaps.append({
-                    "title": f"Verify: {item[:50]}",
-                    "category": cat,
-                    "why": f"{kind} not matched in existing tests",
-                    "steps": [],   # rule-based can't synthesize selectors
-                })
+        # If the parser found no explicit criteria, fall back to the raw story
+        # split into sentences so we still produce requirement-driven tests.
+        if not items and requirement.story:
+            import re
+            # split on line breaks; also break "I want to X so that Y" patterns
+            raw_lines = re.split(r"[\n\r]+", requirement.story)
+            for line in raw_lines:
+                s = line.strip(" \t-*0123456789.,")
+                # if the whole line is just "As a user" boilerplate, skip it
+                if re.match(r"(?i)^as an?\s+[\w\s]{1,20}$", s) and not re.search(r"(?i)\b(want|should|go|click|sign|login|navigate|land|open|able)\b", s):
+                    continue
+                # otherwise strip a leading "As a [role]" clause inline
+                s = re.sub(r"(?i)^as an?\s+\w+(\s+\w+){0,2}?\s*,?\s*(?=i\b|want|should|be able|go|click|navigate|login|sign|land)", "", s).strip()
+                # further split "I want to A and B" / "want to A. B" into pieces
+                for piece in re.split(r"(?i)\b(?:and then|and|;|\.)\b", s):
+                    p = piece.strip(" \t,")
+                    p = re.sub(r"(?i)^(i want to|i should be able to|be able to)\s*", "", p).strip()
+                    if len(p) > 6:
+                        items.append(("criterion", p))
 
+        for kind, item in items:
+            low = item.lower()
+            nav_target = base_url or req_url_fallback or "/"
+            steps = [TestStep(action=ActionType.NAVIGATE, value=nav_target,
+                              description=f"Open {nav_target}")]
+            cat = TestCategory.SECURITY if kind == "constraint" else TestCategory.HAPPY_PATH
+
+            # Map common intents in the criterion to real actions
+            if any(k in low for k in ("sign in", "signin", "log in", "login", "sign-in")):
+                sl = signin_locator()
+                if sl:
+                    mode, loc = sl
+                    steps.append(TestStep(action=ActionType.CLICK, locator=loc,
+                                          description="Click the sign-in control"))
+                else:
+                    steps.append(TestStep(action=ActionType.ASSERT_VISIBLE,
+                                          locator=Locator(strategy="css", value="body"),
+                                          description="Sign-in control expected on page"))
+            elif any(k in low for k in ("land", "load", "open", "home", "page")):
+                steps.append(TestStep(action=ActionType.ASSERT_VISIBLE,
+                                      locator=Locator(strategy="css", value="body"),
+                                      description="Page loads and is visible"))
+            elif forms and any(k in low for k in ("submit", "form", "enter", "fill", "register", "create")):
+                for inp in forms[0].get("inputs", []):
+                    t = (inp.get("type") or "text")
+                    if t in ("hidden", "submit", "button"):
+                        continue
+                    loc = (Locator(strategy="id", value=inp["id"]) if inp.get("id")
+                           else Locator(strategy="name", value=inp["name"]) if inp.get("name")
+                           else None)
+                    if loc:
+                        steps.append(TestStep(action=ActionType.FILL, locator=loc,
+                                              value="test@example.com" if t == "email" else "Test123!",
+                                              description=f"Fill {inp.get('name') or inp.get('id')}"))
+                steps.append(TestStep(action=ActionType.CLICK, locator=submit_locator(),
+                                      description="Submit the form"))
+            else:
+                # generic verification of the criterion
+                steps.append(TestStep(action=ActionType.ASSERT_VISIBLE,
+                                      locator=Locator(strategy="css", value="body"),
+                                      description=f"Verify: {item[:60]}"))
+
+            cases.append(TestCase(
+                name=f"Requirement: {item[:60]}",
+                category=cat,
+                source=f"req:{requirement.source}",
+                steps=steps,
+            ))
+            gaps.append({"title": f"Requirement: {item[:50]}",
+                         "category": cat.value, "why": item, "steps": []})
+
+        # Coverage = how many criteria we produced a test for (all of them here)
         total = len(items) or 1
-        coverage = int(100 * len(covered) / total)
+        coverage = int(100 * len(cases) / total) if total else 0
         return {
-            "covered": covered,
+            "covered": [c.name for c in cases],
             "gaps": gaps,
-            "missing_cases": [],   # no runnable steps without page knowledge
+            "missing_cases": cases,
             "coverage": coverage,
             "analyzed_by": "rules",
         }

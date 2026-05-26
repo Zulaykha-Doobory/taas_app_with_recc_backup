@@ -26,9 +26,70 @@ def _fetch_raw(url: str, timeout: int = 10) -> str:
         return resp.read(120_000).decode("utf-8", errors="ignore")
 
 
-def extract_structure(url: str) -> Dict[str, Any]:
-    """Return forms/inputs/buttons/headings/links for a URL as plain dicts."""
-    html = _fetch_raw(url)
+def _fetch_rendered(url: str, timeout: int = 20) -> Optional[str]:
+    """
+    Load the page in a REAL headless Chrome and return the rendered HTML
+    (after JavaScript runs). This sees what a real user's browser sees, so it
+    works on JS-heavy single-page apps and gets past most bot blocks that
+    reject plain requests. Returns None if Selenium/Chrome isn't available.
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        import time as _t
+
+        opts = Options()
+        opts.add_argument("--headless=new")
+        opts.add_argument("--window-size=1280,900")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        # a real browser UA helps with sites that sniff for bots
+        opts.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/124.0 Safari/537.36")
+        opts.add_experimental_option("excludeSwitches", ["enable-logging"])
+
+        driver = None
+        try:
+            driver = webdriver.Chrome(options=opts)
+        except Exception:
+            from selenium.webdriver.chrome.service import Service
+            from webdriver_manager.chrome import ChromeDriverManager
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()),
+                                      options=opts)
+        try:
+            driver.set_page_load_timeout(timeout)
+            driver.get(url)
+            _t.sleep(2)  # let JS render
+            return driver.page_source
+        finally:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+
+def extract_structure(url: str, prefer_browser: bool = True) -> Dict[str, Any]:
+    """
+    Return forms/inputs/buttons/headings/links for a URL as plain dicts.
+
+    By default reads the page through a REAL browser (so JS-rendered and
+    bot-protected sites work). Falls back to a plain HTTP fetch if the browser
+    isn't available or fails.
+    """
+    html = None
+    read_via = "fetch"
+    if prefer_browser:
+        html = _fetch_rendered(url)
+        if html:
+            read_via = "browser"
+    if not html:
+        html = _fetch_raw(url)
+        read_via = "fetch"
+
     ex = _StructureExtractor()
     ex.feed(html)
     return {
@@ -37,6 +98,7 @@ def extract_structure(url: str) -> Dict[str, Any]:
         "headings": ex.headings,
         "links": [l for l in ex.links if l.get("href")],
         "summary": ex.summary(),
+        "read_via": read_via,
     }
 
 
@@ -82,29 +144,43 @@ class SmartURLGenerator:
     def generate_suite(self, url: str, suite_name: Optional[str] = None) -> TestSuite:
         struct = extract_structure(url)
 
-        # Try Ollama first if requested and available
-        cases: List[TestCase] = []
-        used = "structure"
+        # ALWAYS build the structure tests first -- this is the reliable baseline
+        # so you never end up with too few tests if the AI is slow or returns little.
+        structure_cases = self._from_structure(url, struct)
+
+        ai_cases: List[TestCase] = []
         if self.use_ollama:
             try:
                 from taas.ai.ollama_generator import OllamaAIGenerator
                 gen = OllamaAIGenerator()
                 if gen.is_available():
-                    cases = gen.generate_for_url(url)
-                    used = "ollama"
+                    ai_cases = gen.generate_for_url(url)
             except Exception:
-                cases = []
+                ai_cases = []
 
-        # Deterministic structure-based generation (always works)
-        if not cases:
-            cases = self._from_structure(url, struct)
+        # Combine: structure baseline + any AI-generated extras.
+        # De-dupe by test name so we don't repeat the same check.
+        seen = set()
+        cases: List[TestCase] = []
+        for c in ai_cases + structure_cases:
+            key = c.name.strip().lower()
+            if key not in seen:
+                seen.add(key)
+                cases.append(c)
+
+        if ai_cases and structure_cases:
+            used = "ollama + structure"
+        elif ai_cases:
+            used = "ollama"
+        else:
             used = "structure"
 
         suite = TestSuite(
             suite_name=suite_name or f"Auto: {url}",
             base_url=url,
             cases=cases,
-            metadata={"generated_by": used, "structure": struct["summary"]},
+            metadata={"generated_by": used, "structure": struct["summary"],
+                      "ai_count": len(ai_cases), "structure_count": len(structure_cases)},
         )
         return suite
 
