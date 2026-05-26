@@ -1,17 +1,14 @@
-// App.jsx — TaaS dashboard root.
-// Tabs: Demo · Live site · Upload · AI Generate.
-// Recordings and Bug Reports are NO LONGER tabs — their artifacts live
-// inside each test row (see TestRow.jsx).
 import { useState, useEffect } from "react";
 import AIGenerateInput from "./components/AIGenerateInput.jsx";
 import CoverageBar from "./components/CoverageBar.jsx";
 import TestRow from "./components/TestRow.jsx";
+import UploadTab from "./components/UploadTab.jsx";
 
 const TABS = [
-  { id: "demo", label: "▶ Demo" },
+  { id: "demo", label: "\u25B6 Demo" },
   { id: "live", label: "Live site" },
-  { id: "upload", label: "⇧ Upload file" },
-  { id: "ai", label: "✨ AI Generate" },
+  { id: "upload", label: "\u2B06 Upload file" },
+  { id: "ai", label: "\u2728 AI Generate" },
 ];
 
 export default function App() {
@@ -41,17 +38,17 @@ export default function App() {
   const summary = result?.summary;
 
   return (
-    <div className="min-h-screen px-6 py-6 max-w-5xl mx-auto">
+    <div className="min-h-screen px-6 py-6 max-w-5xl mx-auto text-[#cfcfda]">
       <header className="mb-6">
-        <h1 className="text-xl font-semibold text-white">
-          TaaS — QA Automation Platform
+        <h1 className="text-xl font-semibold text-[#f2f2f5]">
+          TaaS &mdash; QA Automation Platform
         </h1>
-        <p className="text-sm text-neutral-400">
-          Requirement-driven test generation · real browser execution
+        <p className="text-sm text-[#9a9aac]">
+          Requirement-driven test generation &middot; real browser execution
         </p>
       </header>
 
-      <nav className="flex gap-1 mb-6 bg-neutral-900/60 p-1 rounded-lg w-fit">
+      <nav className="flex gap-1 mb-6 bg-[#1c1c26] p-1 rounded-lg w-fit border border-[#2f2f3d]">
         {TABS.map((t) => (
           <button
             key={t.id}
@@ -59,8 +56,8 @@ export default function App() {
             className={
               "px-4 py-2 text-sm rounded-md transition " +
               (tab === t.id
-                ? "bg-[#cc0011] text-white"
-                : "text-neutral-400 hover:text-neutral-100")
+                ? "bg-[#e11d2a] text-white"
+                : "text-[#cfcfda] hover:text-white hover:bg-[#23232f]")
             }
           >
             {t.label}
@@ -72,58 +69,55 @@ export default function App() {
         <div className="mb-6">
           <div className="flex items-center gap-2 mb-4 text-sm">
             <span
-              className={`inline-block w-2 h-2 rounded-full ${
-                ai.running ? "bg-green-500" : "bg-amber-500"
-              }`}
+              className={"inline-block w-2 h-2 rounded-full " + (ai.running ? "bg-[#4ade80]" : "bg-[#fbbf24]")}
             />
-            <span className="text-neutral-400">
+            <span className="text-[#cfcfda]">
               {ai.running
-                ? `Ollama running · ${ai.model} · ready`
-                : "Ollama not detected — structure-based generation will be used"}
+                ? `Ollama running \u00B7 ${ai.model} \u00B7 ready`
+                : "Ollama not detected \u2014 structure-based generation will be used"}
             </span>
           </div>
-          <AIGenerateInput
-            onRun={(data) => setResult(data)}
-          />
+          <AIGenerateInput onRun={(data) => setResult(data)} />
+        </div>
+      )}
+
+      {tab === "upload" && (
+        <div className="mb-6">
+          <UploadTab onRun={(data) => setResult(data)} />
         </div>
       )}
 
       {tab === "live" && (
         <div className="mb-6">
-          <p className="text-sm text-neutral-400 mb-3">
+          <p className="text-sm text-[#cfcfda] mb-3">
             Runs the real suite against the-internet.herokuapp.com in a real
             browser, recording and flagging failures automatically.
           </p>
           <button
             onClick={() => runSimple("/run/live?record_mode=browser")}
-            className="rounded-lg bg-[#cc0011] px-5 py-2 text-sm font-medium text-white hover:bg-[#a8000e]"
+            className="rounded-lg bg-[#e11d2a] px-5 py-2 text-sm font-medium text-white hover:bg-[#c0151f]"
           >
-            ▶ Run live suite
+            &#9654; Run live suite
           </button>
         </div>
       )}
 
       {tab === "demo" && (
         <div className="mb-6">
+          <p className="text-sm text-[#cfcfda] mb-3">
+            A quick canned demonstration of how results, recordings, and bug
+            reports look.
+          </p>
           <button
             onClick={() => runSimple("/run/demo")}
-            className="rounded-lg bg-[#cc0011] px-5 py-2 text-sm font-medium text-white hover:bg-[#a8000e]"
+            className="rounded-lg bg-[#e11d2a] px-5 py-2 text-sm font-medium text-white hover:bg-[#c0151f]"
           >
-            ▶ Run demo
+            &#9654; Run demo
           </button>
         </div>
       )}
 
-      {tab === "upload" && (
-        <div className="mb-6 text-sm text-neutral-400">
-          Upload tab — download the template, fill it in, and upload to run your
-          own tests. (Wired to existing /upload and /templates endpoints.)
-        </div>
-      )}
-
-      {loading && (
-        <p className="text-neutral-400 text-sm">Running tests…</p>
-      )}
+      {loading && <p className="text-[#cfcfda] text-sm">Running tests&hellip;</p>}
 
       {result && (
         <section>
@@ -137,41 +131,25 @@ export default function App() {
           {summary && (
             <div className="grid grid-cols-5 gap-3 mb-5">
               {[
-                ["Total", summary.total, "text-neutral-100"],
-                ["Passed", summary.passed, "text-green-400"],
-                ["Failed", summary.failed, "text-red-400"],
-                ["Errored", summary.error, "text-amber-400"],
-                [
-                  "Pass rate",
-                  summary.total
-                    ? Math.round((summary.passed / summary.total) * 100) + "%"
-                    : "—",
-                  "text-neutral-100",
-                ],
+                ["Total", summary.total, "text-[#f2f2f5]"],
+                ["Passed", summary.passed, "text-[#4ade80]"],
+                ["Failed", summary.failed, "text-[#f87171]"],
+                ["Errored", summary.error, "text-[#fbbf24]"],
+                ["Pass rate", summary.total ? Math.round((summary.passed / summary.total) * 100) + "%" : "\u2014", "text-[#f2f2f5]"],
               ].map(([label, val, cls]) => (
-                <div
-                  key={label}
-                  className="rounded-lg bg-neutral-900/60 border border-neutral-800 p-3"
-                >
-                  <div className={`text-2xl font-semibold ${cls}`}>{val}</div>
-                  <div className="text-xs text-neutral-500">{label}</div>
+                <div key={label} className="rounded-lg bg-[#1c1c26] border border-[#2f2f3d] p-3">
+                  <div className={"text-2xl font-semibold " + cls}>{val}</div>
+                  <div className="text-xs text-[#9a9aac]">{label}</div>
                 </div>
               ))}
             </div>
           )}
 
-          {result.note && (
-            <p className="text-xs text-amber-300/80 mb-3">{result.note}</p>
-          )}
+          {result.note && <p className="text-xs text-[#fbbf24] mb-3">{result.note}</p>}
 
           <div className="flex flex-col gap-2">
             {(result.cases || []).map((t, i) => (
-              <TestRow
-                key={i}
-                test={t}
-                runId={result.run_id}
-                videoPath={result.video_path}
-              />
+              <TestRow key={i} test={t} runId={result.run_id} videoPath={result.video_path} />
             ))}
           </div>
         </section>
