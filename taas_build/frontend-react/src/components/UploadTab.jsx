@@ -4,6 +4,7 @@ import { useState, useRef } from "react";
 
 export default function UploadTab({ onRun }) {
   const [file, setFile] = useState(null);
+  const [baseUrl, setBaseUrl] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -30,6 +31,7 @@ export default function UploadTab({ onRun }) {
     try {
       const fd = new FormData();
       fd.append("file", file);
+      fd.append("base_url", baseUrl.trim());
       const r = await fetch("/upload/run", { method: "POST", body: fd });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
@@ -85,6 +87,19 @@ export default function UploadTab({ onRun }) {
       <div className="rounded-xl bg-[#1c1c26] border border-[#2f2f3d] p-4">
         <div className="text-sm font-medium text-[#f2f2f5] mb-3">
           2 · Upload your filled file
+        </div>
+
+        <div className="mb-3">
+          <label className="block text-xs text-[#9a9aac] mb-1">
+            Base URL (optional) — used when your steps have relative paths like /login
+          </label>
+          <input
+            type="text"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            placeholder="https://your-app.com"
+            className="w-full rounded-lg border border-[#3d3d4f] bg-[#0f0f15] px-3 py-2 text-sm text-[#f2f2f5] placeholder-[#6f6f80] focus:outline-none focus:ring-2 focus:ring-[#e11d2a]/40"
+          />
         </div>
 
         <div

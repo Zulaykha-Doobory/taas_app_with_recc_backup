@@ -437,8 +437,16 @@ def download_excel_template():
 
 
 @app.post("/upload/run")
-async def upload_and_run(file: UploadFile = File(...)):
-    """Accept an uploaded Excel or CSV file, parse it, run it immediately."""
+async def upload_and_run(file: UploadFile = File(...),
+                         base_url: str = "",
+                         record_mode: str = "browser"):
+    """
+    Accept an uploaded Excel or CSV file, parse it, and run it in a real
+    browser. A base_url can be supplied so tests that use relative paths
+    (like /login) know which site to run against. Records and auto-creates
+    bug reports for failures, like the other run endpoints.
+    """
+    import uuid as _uuid
     data = await file.read()
     fname = (file.filename or "").lower()
     parser = UploadParser()
@@ -451,16 +459,72 @@ async def upload_and_run(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"Could not parse file: {e}")
     if not cases:
         raise HTTPException(status_code=400, detail="No test cases found in file.")
-    suite = TestSuite(suite_name=f"Uploaded: {file.filename}", base_url="", cases=cases)
+
+    suite = TestSuite(suite_name=f"Uploaded: {file.filename}",
+                      base_url=base_url.strip(), cases=cases)
     val = IRValidator().validate_suite([c.model_dump(mode="json") for c in cases])
     if not val.ok:
         raise HTTPException(status_code=422, detail={
             "message": "File has invalid test steps.",
             "issues": [{"path": i.path, "message": i.message} for i in val.errors],
         })
-    result = runner.run_suite(suite).to_dict()
+
+    target = base_url.strip()
+    run_id = _uuid.uuid4().hex[:8]
+    want_browser = record_mode in ("browser", "both")
+    want_screen = record_mode in ("screen", "both")
+    screen_rec = _recorder.start(f"upload_screen_{run_id}") if want_screen else None
+
+    used_runner = "selenium"
+    note = None
+    video_path = None
+    try:
+        from taas.execute.runner import (SeleniumRunner, stitch_frames_to_video,
+                                         clear_frames)
+        frames_dir = f"./recordings/frames_{run_id}"
+        if want_browser:
+            clear_frames(frames_dir)
+        live_runner = SeleniumRunner(headless=False, capture_frames=want_browser,
+                                     frames_dir=frames_dir)
+        _probe = live_runner._make_driver(); _probe.quit()
+        run = live_runner.run_suite(suite, target_url=target)
+        if want_browser:
+            video_path = stitch_frames_to_video(
+                frames_dir, f"./recordings/upload_{run_id}.mp4", fps=8)
+    except Exception as e:
+        used_runner = "simulation (fallback)"
+        note = f"Real browser unavailable, used simulation. Detail: {str(e)[:100]}"
+        run = runner.run_suite(suite, target_url=target)
+
+    if screen_rec:
+        video_path = video_path or _recorder.stop()
+
+    result = run.to_dict()
+    _active_runs[run_id] = {"final_path": video_path}
+
+    # Auto-create bug reports for failures (consistency with Live/AI runs)
+    bug_reports = []
+    for case in result["cases"]:
+        if case["status"] in ("failed", "error"):
+            bug_reports.append(_bugs.create(
+                test_name=case["name"],
+                failure_reason=case.get("failure_reason") or "Test failed",
+                expected="Test should pass",
+                actual=case.get("failure_reason") or "Failed",
+                video_path=video_path, run_id=run_id))
+
+    result["run_id"] = run_id
+    result["video_path"] = video_path
+    result["record_mode"] = record_mode
+    result["used_runner"] = used_runner
+    result["bug_reports"] = bug_reports
+    if note:
+        result["note"] = note
+
     RUN_HISTORY.insert(0, {"id": len(RUN_HISTORY)+1, "suite_name": result["suite_name"],
-                           "started_at": result["started_at"], "summary": result["summary"]})
+                           "started_at": result["started_at"], "summary": result["summary"],
+                           "run_id": run_id, "video_path": video_path,
+                           "bug_count": len(bug_reports)})
     return result
 
 
