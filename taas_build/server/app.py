@@ -44,6 +44,16 @@ from taas.ai.ollama_generator import OllamaAIGenerator
 
 app = FastAPI(title="TaaS IR Engine", version="0.4.0")
 
+# Serve the built React app's assets and the recordings/screenshots, if present.
+import os as _os
+from fastapi.staticfiles import StaticFiles
+_static_dir = _os.path.join(_os.path.dirname(__file__), "static")
+if _os.path.isdir(_os.path.join(_static_dir, "assets")):
+    app.mount("/assets", StaticFiles(directory=_os.path.join(_static_dir, "assets")), name="assets")
+_rec_dir = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), "recordings")
+if _os.path.isdir(_rec_dir):
+    app.mount("/recordings", StaticFiles(directory=_rec_dir), name="recordings")
+
 # One generator instance. Swapping to the real LLM is the only change needed:
 #   from taas.ai.generator import OllamaIRGenerator
 #   ai = OllamaIRGenerator(model="qwen2.5-coder:14b")
@@ -271,10 +281,30 @@ def _build_live_suite() -> TestSuite:
         ],
     ))
 
+    # 7. Intentional failure — demonstrates automatic bug-report generation.
+    #    This expects a welcome message that the site does NOT show after a
+    #    wrong-password attempt, so it fails on purpose. The failure auto-creates
+    #    a bug report you can open in the Bug Reports tab.
+    suite.cases.append(TestCase(
+        name="Detect missing welcome banner (demo failure)",
+        category=TestCategory.NEGATIVE,
+        source="live:the-internet/login",
+        tags=["login", "demo", "expected-failure"],
+        steps=[
+            step(ActionType.NAVIGATE, "Open login page", value="/login"),
+            step(ActionType.FILL, "Enter username",
+                 "id", "username", "tomsmith"),
+            step(ActionType.FILL, "Enter a wrong password",
+                 "id", "password", "wrongpassword"),
+            step(ActionType.CLICK, "Click Login button",
+                 "css", "button[type='submit']"),
+            step(ActionType.ASSERT_TEXT,
+                 "Expect a welcome banner (this SHOULD fail — there is none)",
+                 "css", ".flash.success", "Welcome back, tomsmith!"),
+        ],
+    ))
+
     return suite
-
-
-# ---- endpoints --------------------------------------------------------
 @app.get("/health")
 def health():
     return {"status": "ok", "generator": type(ai).__name__}
@@ -437,6 +467,13 @@ async def upload_and_run(file: UploadFile = File(...)):
 class AiGenerateReq(BaseModel):
     url: str
     record_mode: str = "browser"   # "browser" | "screen" | "both"
+
+
+class RequirementReq(BaseModel):
+    url: str
+    source: str = "text"            # "text" | "jira" | "azure"
+    requirement: str                # free text, or ticket ID (PROJ-123 / AB#456)
+    record_mode: str = "browser"    # "browser" | "screen" | "both"
 
 
 @app.post("/ai/generate-and-run")
@@ -641,6 +678,13 @@ def list_runs():
 
 @app.get("/", response_class=HTMLResponse)
 def index():
+    # If the React app has been built (server/static/index.html exists), serve it.
+    # Otherwise fall back to the built-in HTML dashboard (no build step needed).
+    import os
+    react_index = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    if os.path.exists(react_index):
+        with open(react_index, encoding="utf-8") as f:
+            return f.read()
     return _INDEX_HTML
 
 
@@ -1136,6 +1180,139 @@ def bug_create(run_id: str, test_data: Dict[str, Any]):
 def bug_list(run_id: str):
     reports = _bugs.list(run_id)
     return {"run_id": run_id, "total_reports": len(reports), "reports": reports}
+
+
+@app.post("/ai/generate-from-requirement")
+def ai_generate_from_requirement(req: RequirementReq):
+    """
+    Requirement-driven test generation with gap analysis.
+    """
+    import uuid as _uuid
+    from taas.ingest.alm_connector import (
+        fetch_jira, fetch_azure, from_text)
+    from taas.ai.gap_analysis import GapAnalysisEngine
+    from taas.ai.smart_url import SmartURLGenerator
+
+    # 1. Resolve the requirement from its source (server-side PAT auth)
+    try:
+        if req.source == "jira":
+            requirement = fetch_jira(req.requirement.strip())
+        elif req.source == "azure":
+            requirement = fetch_azure(req.requirement.strip())
+        else:
+            requirement = from_text(req.requirement)
+    except RuntimeError as e:
+        # e.g. "Jira not configured" or API error — surface cleanly
+        raise HTTPException(status_code=400, detail={"message": str(e)})
+
+    # 2. Get the EXISTING tests for this URL (structure baseline) so the gap
+    #    analysis has something to compare the requirement against.
+    try:
+        existing_suite = SmartURLGenerator(use_ollama_if_available=False)\
+            .generate_suite(req.url)
+        existing_cases = existing_suite.cases
+    except Exception:
+        existing_cases = []
+
+    # 3. Gap analysis: requirement vs existing tests -> missing tests + coverage
+    gap = GapAnalysisEngine(use_ollama=True).analyze(requirement, existing_cases)
+
+    # 4. The suite to run = existing baseline + AI-generated missing tests
+    all_cases = list(existing_cases) + list(gap.get("missing_cases", []))
+    from taas.ir.schema import TestSuite
+
+    # If nothing runnable was produced (e.g. URL unreachable AND no AI steps),
+    # return the gap analysis without trying to run an empty suite.
+    if not all_cases:
+        return {
+            "suite_name": f"Req: {requirement.title}",
+            "summary": {"total": 0, "passed": 0, "failed": 0, "error": 0},
+            "cases": [],
+            "run_id": None,
+            "requirement": requirement.to_dict(),
+            "coverage": gap.get("coverage"),
+            "covered": gap.get("covered", []),
+            "gaps": gap.get("gaps", []),
+            "gap_analyzed_by": gap.get("analyzed_by"),
+            "test_count": 0,
+            "note": ("Gap analysis complete, but no runnable tests could be "
+                     "generated. This happens when the target URL can't be read "
+                     "and the AI couldn't synthesize steps. Connect Ollama and "
+                     "use a reachable URL to generate runnable gap tests."),
+        }
+
+    suite = TestSuite(suite_name=f"Req: {requirement.title}",
+                      base_url=req.url, cases=all_cases)
+    SeleniumTranslator().render_suite(suite)
+
+    run_id = _uuid.uuid4().hex[:8]
+    want_browser = req.record_mode in ("browser", "both")
+    want_screen = req.record_mode in ("screen", "both")
+    screen_rec = _recorder.start(f"req_screen_{run_id}") if want_screen else None
+
+    # 5. Run in a real browser (with the now-familiar fallback)
+    used_runner = "selenium"
+    video_path = None
+    note = None
+    try:
+        from taas.execute.runner import (SeleniumRunner, stitch_frames_to_video,
+                                         clear_frames)
+        frames_dir = f"./recordings/frames_{run_id}"
+        if want_browser:
+            clear_frames(frames_dir)
+        live_runner = SeleniumRunner(headless=False, capture_frames=want_browser,
+                                     frames_dir=frames_dir)
+        _probe = live_runner._make_driver(); _probe.quit()
+        run = live_runner.run_suite(suite, target_url=req.url)
+        if want_browser:
+            video_path = stitch_frames_to_video(
+                frames_dir, f"./recordings/req_{run_id}.mp4", fps=8)
+    except Exception as e:
+        used_runner = "simulation (fallback)"
+        note = f"Real browser unavailable, used simulation. Detail: {str(e)[:100]}"
+        run = runner.run_suite(suite, target_url=req.url)
+
+    if screen_rec:
+        video_path = video_path or _recorder.stop()
+    elif want_screen:
+        _recorder.stop()
+
+    result = run.to_dict()
+    _active_runs[run_id] = {"final_path": video_path}
+
+    # 6. Bug reports for failures
+    bug_reports = []
+    for case in result["cases"]:
+        if case["status"] in ("failed", "error"):
+            bug_reports.append(_bugs.create(
+                test_name=case["name"],
+                failure_reason=case.get("failure_reason") or "Test failed",
+                expected="Test should pass",
+                actual=case.get("failure_reason") or "Failed",
+                video_path=video_path, run_id=run_id))
+
+    # 7. Attach the gap-analysis summary so the UI can show coverage + gaps
+    result.update({
+        "run_id": run_id,
+        "video_path": video_path,
+        "record_mode": req.record_mode,
+        "used_runner": used_runner,
+        "bug_reports": bug_reports,
+        "requirement": requirement.to_dict(),
+        "coverage": gap.get("coverage"),
+        "covered": gap.get("covered", []),
+        "gaps": gap.get("gaps", []),
+        "gap_analyzed_by": gap.get("analyzed_by"),
+        "test_count": len(all_cases),
+    })
+    if note:
+        result["note"] = note
+
+    RUN_HISTORY.insert(0, {"id": len(RUN_HISTORY)+1, "suite_name": result["suite_name"],
+                           "started_at": result["started_at"], "summary": result["summary"],
+                           "run_id": run_id, "video_path": video_path,
+                           "bug_count": len(bug_reports), "coverage": gap.get("coverage")})
+    return result
 
 
 if __name__ == "__main__":
