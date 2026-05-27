@@ -13,9 +13,15 @@ const TABS = [
 
 export default function App() {
   const [tab, setTab] = useState("ai");
-  const [result, setResult] = useState(null);
+  // results are stored PER TAB so each tab keeps its own and they never
+  // bleed across tabs. e.g. { ai: {...}, upload: {...} }
+  const [resultsByTab, setResultsByTab] = useState({});
   const [loading, setLoading] = useState(false);
   const [ai, setAi] = useState({ running: false, model: null });
+
+  const result = resultsByTab[tab] || null;
+  const setResultForTab = (data) =>
+    setResultsByTab((prev) => ({ ...prev, [tab]: data }));
 
   useEffect(() => {
     fetch("/ai/status")
@@ -26,10 +32,10 @@ export default function App() {
 
   async function runSimple(endpoint) {
     setLoading(true);
-    setResult(null);
+    setResultForTab(null);
     try {
       const r = await fetch(endpoint, { method: "POST" });
-      setResult(await r.json());
+      setResultForTab(await r.json());
     } finally {
       setLoading(false);
     }
@@ -52,7 +58,7 @@ export default function App() {
         {TABS.map((t) => (
           <button
             key={t.id}
-            onClick={() => { setTab(t.id); setResult(null); }}
+            onClick={() => setTab(t.id)}
             className={
               "px-4 py-2 text-sm rounded-md transition " +
               (tab === t.id
@@ -77,13 +83,13 @@ export default function App() {
                 : "Ollama not detected \u2014 structure-based generation will be used"}
             </span>
           </div>
-          <AIGenerateInput onRun={(data) => setResult(data)} onModeChange={() => setResult(null)} />
+          <AIGenerateInput onRun={(data) => setResultForTab(data)} />
         </div>
       )}
 
       {tab === "upload" && (
         <div className="mb-6">
-          <UploadTab onRun={(data) => setResult(data)} />
+          <UploadTab onRun={(data) => setResultForTab(data)} />
         </div>
       )}
 
