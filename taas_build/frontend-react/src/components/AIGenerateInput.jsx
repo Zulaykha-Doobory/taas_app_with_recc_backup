@@ -16,7 +16,7 @@ const MODES = [
   { id: "azure", label: "Azure work item", placeholder: "AB#456" },
 ];
 
-export default function AIGenerateInput({ onRun }) {
+export default function AIGenerateInput({ onRun, onModeChange }) {
   const [url, setUrl] = useState("https://the-internet.herokuapp.com/login");
   const [mode, setMode] = useState("url");
   const [requirement, setRequirement] = useState("");
@@ -79,7 +79,7 @@ export default function AIGenerateInput({ onRun }) {
         {MODES.map((m) => (
           <button
             key={m.id}
-            onClick={() => setMode(m.id)}
+            onClick={() => { setMode(m.id); onModeChange?.(); }}
             className={
               "px-3 py-1.5 text-sm rounded-md transition " +
               (mode === m.id

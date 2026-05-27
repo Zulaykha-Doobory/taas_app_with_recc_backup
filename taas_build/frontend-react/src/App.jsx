@@ -52,7 +52,7 @@ export default function App() {
         {TABS.map((t) => (
           <button
             key={t.id}
-            onClick={() => setTab(t.id)}
+            onClick={() => { setTab(t.id); setResult(null); }}
             className={
               "px-4 py-2 text-sm rounded-md transition " +
               (tab === t.id
@@ -77,7 +77,7 @@ export default function App() {
                 : "Ollama not detected \u2014 structure-based generation will be used"}
             </span>
           </div>
-          <AIGenerateInput onRun={(data) => setResult(data)} />
+          <AIGenerateInput onRun={(data) => setResult(data)} onModeChange={() => setResult(null)} />
         </div>
       )}
 

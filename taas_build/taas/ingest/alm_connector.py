@@ -224,14 +224,107 @@ def from_text(text: str, title: str = "Pasted requirement") -> Requirement:
 # Single entry point
 # ---------------------------------------------------------------------------
 
-def fetch_requirement(user_input: str) -> Requirement:
+def fetch_jira_oauth(ticket_id: str, tenant_id: str) -> Requirement:
+    """
+    Fetch a Jira ticket using a tenant's stored OAuth token (auto-refreshing
+    if expired). This is the multi-client path — no PAT needed.
+    """
+    from taas.auth.token_store import TokenStore
+    from taas.auth import oauth_flows
+
+    store = TokenStore()
+    tok = store.get(tenant_id, "jira")
+    if not tok:
+        raise RuntimeError("This client hasn't connected Jira yet.")
+    if tok.is_expired:
+        tok = oauth_flows.refresh(tok)
+        store.save(tok)
+
+    cloud_id = tok.meta.get("cloud_id")
+    if not cloud_id:
+        raise RuntimeError("Jira cloud id missing; client should reconnect.")
+
+    url = (f"https://api.atlassian.com/ex/jira/{cloud_id}"
+           f"/rest/api/3/issue/{ticket_id}")
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {tok.access_token}",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Jira API error {e.code}: check ticket ID / access.")
+
+    fields = data.get("fields", {})
+    title = fields.get("summary", ticket_id)
+    story = _adf_to_text(fields.get("description")) or ""
+    return Requirement(
+        source=f"jira:{ticket_id}",
+        title=title, story=story,
+        acceptance_criteria=_split_criteria(story),
+        constraints=_extract_constraints(story + " " + title),
+    )
+
+
+def fetch_azure_oauth(work_item_id: str, tenant_id: str) -> Requirement:
+    """Fetch an Azure DevOps work item using a tenant's stored Entra token."""
+    from taas.auth.token_store import TokenStore
+    from taas.auth import oauth_flows
+
+    store = TokenStore()
+    tok = store.get(tenant_id, "azure")
+    if not tok:
+        raise RuntimeError("This client hasn't connected Azure DevOps yet.")
+    if tok.is_expired:
+        tok = oauth_flows.refresh(tok)
+        store.save(tok)
+
+    org = os.environ.get("AZURE_ORG")
+    project = os.environ.get("AZURE_PROJECT")
+    if not (org and project):
+        raise RuntimeError("AZURE_ORG / AZURE_PROJECT not configured.")
+
+    wid = work_item_id.replace("AB#", "").strip()
+    url = (f"https://dev.azure.com/{org}/{project}/_apis/wit/workitems/"
+           f"{wid}?$expand=all&api-version=7.0")
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {tok.access_token}",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.load(r)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Azure API error {e.code}: check work item ID / access.")
+
+    f = data.get("fields", {})
+    title = f.get("System.Title", f"Work item {wid}")
+    story = _strip_html(f.get("System.Description", "")) or ""
+    criteria_raw = _strip_html(f.get("Microsoft.VSTS.Common.AcceptanceCriteria", ""))
+    criteria = _split_criteria(criteria_raw) or _split_criteria(story)
+    return Requirement(
+        source=f"azure:{wid}",
+        title=title, story=story,
+        acceptance_criteria=criteria,
+        constraints=_extract_constraints(story + " " + criteria_raw + " " + title),
+    )
+
+
+def fetch_requirement(user_input: str, tenant_id: str = None,
+                      use_oauth: bool = False) -> Requirement:
     """
     Turn whatever the user typed into a normalized Requirement.
-    Routes to Jira / Azure / text automatically.
+    Routes to Jira / Azure / text automatically. When use_oauth is True and a
+    tenant_id is given, uses the tenant's stored OAuth token instead of a PAT.
     """
     kind = classify_input(user_input)
     if kind == "jira":
+        if use_oauth and tenant_id:
+            return fetch_jira_oauth(user_input.strip(), tenant_id)
         return fetch_jira(user_input.strip())
     if kind == "azure":
+        if use_oauth and tenant_id:
+            return fetch_azure_oauth(user_input.strip(), tenant_id)
         return fetch_azure(user_input.strip())
     return from_text(user_input)

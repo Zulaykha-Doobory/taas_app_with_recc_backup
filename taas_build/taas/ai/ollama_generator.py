@@ -257,15 +257,25 @@ class OllamaAIGenerator:
         except Exception:
             return []
 
-    def generate_for_url(self, url: str) -> List[TestCase]:
+    def generate_for_url(self, url: str, structure: str = None) -> List[TestCase]:
         """
-        Main entry point. Fetches the page, extracts structure,
-        calls Ollama, returns validated IR TestCases.
+        Main entry point. Fetches the page (through a real browser when
+        possible), extracts structure, calls Ollama, returns validated IR
+        TestCases. A pre-computed structure string can be passed in to avoid
+        fetching the page twice.
         """
         source = f"ai:ollama:{url}"
 
-        # 1. Fetch and extract page structure
-        structure = _fetch_page_structure(url)
+        # 1. Use the rendered-page structure when available so Ollama sees the
+        #    REAL elements and doesn't hallucinate selectors. Fall back to the
+        #    plain fetch only if the rendered read produced nothing.
+        if structure is None:
+            try:
+                from taas.ai.smart_url import extract_structure
+                s = extract_structure(url)   # reads through real browser first
+                structure = s.get("summary") or _fetch_page_structure(url)
+            except Exception:
+                structure = _fetch_page_structure(url)
 
         # 2. Build prompt and call Ollama
         prompt = _build_prompt(url, structure)

@@ -132,6 +132,59 @@ def _sample_value(inp: Dict[str, str]) -> str:
     return "Test Input"
 
 
+def _collect_real_identifiers(struct: Dict[str, Any]) -> set:
+    """Gather every id/name/link-text that actually exists on the page."""
+    ids = set()
+    for form in struct.get("forms", []):
+        for inp in form.get("inputs", []):
+            if inp.get("id"):
+                ids.add(inp["id"].lower())
+            if inp.get("name"):
+                ids.add(inp["name"].lower())
+    for b in struct.get("buttons", []):
+        if b.get("id"):
+            ids.add(b["id"].lower())
+        if b.get("text"):
+            ids.add(b["text"].lower())
+    for l in struct.get("links", []):
+        if l.get("id"):
+            ids.add(l["id"].lower())
+        if l.get("text"):
+            ids.add(l["text"].lower())
+    return ids
+
+
+def _filter_to_real_elements(cases: List[TestCase], struct: Dict[str, Any]) -> List[TestCase]:
+    """
+    Remove test steps whose id/name locator points at an element that isn't on
+    the real page. Steps using css/xpath or assertions are left alone (they may
+    be legitimately general). A case with no usable steps left is dropped.
+    """
+    real = _collect_real_identifiers(struct)
+    if not real:
+        # We couldn't read structure (e.g. blocked page) -> don't over-filter.
+        return cases
+
+    kept = []
+    for c in cases:
+        good_steps = []
+        for s in c.steps:
+            loc = s.locator
+            if loc and loc.strategy in ("id", "name") and loc.value:
+                if loc.value.lower() not in real:
+                    # references an element that doesn't exist -> skip step
+                    continue
+            if loc and loc.strategy == "link_text" and loc.value:
+                if loc.value.lower() not in real:
+                    continue
+            good_steps.append(s)
+        # keep the case only if it still has a meaningful action left
+        if any(st.action.value not in ("navigate",) for st in good_steps):
+            c.steps = good_steps
+            kept.append(c)
+    return kept
+
+
 class SmartURLGenerator:
     """
     Generates IR test cases for any URL from its detected structure.
@@ -154,9 +207,37 @@ class SmartURLGenerator:
                 from taas.ai.ollama_generator import OllamaAIGenerator
                 gen = OllamaAIGenerator()
                 if gen.is_available():
-                    ai_cases = gen.generate_for_url(url)
+                    ai_cases = gen.generate_for_url(url, structure=struct.get("summary"))
             except Exception:
                 ai_cases = []
+
+        # Drop AI steps that reference elements which DON'T exist on the real
+        # rendered page. This kills hallucinated selectors (e.g. a model
+        # inventing 'nav-assist-show-shortcuts' that isn't on the page).
+        ai_cases = _filter_to_real_elements(ai_cases, struct)
+
+        # Detect an unreadable page: no forms, no buttons, no links means the
+        # site blocked our browser (common on bot-protected sites). In that
+        # case, element-specific AI tests are pure guesses, so we drop any that
+        # use id/name/link locators and keep only safe page-level checks.
+        page_readable = bool(struct.get("forms") or struct.get("buttons")
+                             or struct.get("links"))
+        page_note = None
+        if not page_readable:
+            page_note = ("This page could not be fully read (it likely blocks "
+                         "automated browsers). Generated only basic page-level "
+                         "checks; element-specific tests need a readable page.")
+            def _safe(c):
+                c.steps = [s for s in c.steps
+                           if not (s.locator and s.locator.strategy in
+                                   ("id", "name", "link_text"))]
+                return c
+            ai_cases = [_safe(c) for c in ai_cases
+                        if any(st.action.value not in ("navigate",)
+                               for st in _safe(c).steps)]
+            structure_cases = [_safe(c) for c in structure_cases
+                               if any(st.action.value not in ("navigate",)
+                                      for st in _safe(c).steps)]
 
         # Combine: structure baseline + any AI-generated extras.
         # De-dupe by test name so we don't repeat the same check.
@@ -180,6 +261,8 @@ class SmartURLGenerator:
             base_url=url,
             cases=cases,
             metadata={"generated_by": used, "structure": struct["summary"],
+                      "read_via": struct.get("read_via", "fetch"),
+                      "page_note": page_note,
                       "ai_count": len(ai_cases), "structure_count": len(structure_cases)},
         )
         return suite

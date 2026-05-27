@@ -29,8 +29,8 @@ from typing import List, Optional, Dict, Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel
 
 from taas.ir.schema import TestSuite, TestCase
@@ -1383,6 +1383,65 @@ def ai_generate_from_requirement(req: RequirementReq):
                            "run_id": run_id, "video_path": video_path,
                            "bug_count": len(bug_reports), "coverage": gap.get("coverage")})
     return result
+
+
+
+# ===== OAuth endpoints =====
+# in-memory state store for the anti-CSRF token (use a real session in prod)
+_oauth_state = {}
+
+
+def _tenant_of(request: Request) -> str:
+    # TODO: replace with real session/auth. For now, a header or 'default'.
+    return request.headers.get("X-Tenant-Id", "default")
+
+
+@app.get("/oauth/{provider}/start")
+def oauth_start(provider: str, request: Request):
+    from taas.auth import oauth_flows
+    if provider not in ("jira", "azure"):
+        raise HTTPException(404, "Unknown provider")
+    try:
+        state = oauth_flows.new_state()
+        _oauth_state[state] = {"tenant": _tenant_of(request), "provider": provider}
+        return RedirectResponse(oauth_flows.build_authorize_url(provider, state))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/oauth/{provider}/callback")
+def oauth_callback(provider: str, code: str = "", state: str = ""):
+    from taas.auth import oauth_flows
+    from taas.auth.token_store import TokenStore
+
+    ctx = _oauth_state.pop(state, None)
+    if not ctx or ctx["provider"] != provider:
+        raise HTTPException(400, "Invalid or expired OAuth state.")
+    if not code:
+        raise HTTPException(400, "No authorization code returned.")
+    try:
+        token = oauth_flows.exchange_code(provider, code, ctx["tenant"])
+        TokenStore().save(token)
+    except Exception as e:
+        raise HTTPException(400, f"OAuth exchange failed: {e}")
+    # Send the client back to the dashboard with a success flag
+    return RedirectResponse(f"/?connected={provider}")
+
+
+@app.get("/oauth/connections")
+def oauth_connections(request: Request):
+    from taas.auth.token_store import TokenStore
+    try:
+        return {"connections": TokenStore().list_connections(_tenant_of(request))}
+    except Exception:
+        return {"connections": []}
+
+
+@app.post("/oauth/{provider}/disconnect")
+def oauth_disconnect(provider: str, request: Request):
+    from taas.auth.token_store import TokenStore
+    TokenStore().delete(_tenant_of(request), provider)
+    return {"ok": True, "disconnected": provider}
 
 
 if __name__ == "__main__":
