@@ -13,15 +13,17 @@ const TABS = [
 
 export default function App() {
   const [tab, setTab] = useState("ai");
-  // results are stored PER TAB so each tab keeps its own and they never
-  // bleed across tabs. e.g. { ai: {...}, upload: {...} }
-  const [resultsByTab, setResultsByTab] = useState({});
+  const [aiMode, setAiMode] = useState("url");
+  // results keyed by tab (and AI sub-mode within the AI tab) so nothing
+  // bleeds across tabs or across URL/Story/Jira/Azure modes.
+  const [resultsByKey, setResultsByKey] = useState({});
   const [loading, setLoading] = useState(false);
   const [ai, setAi] = useState({ running: false, model: null });
 
-  const result = resultsByTab[tab] || null;
-  const setResultForTab = (data) =>
-    setResultsByTab((prev) => ({ ...prev, [tab]: data }));
+  const resultKey = tab === "ai" ? `ai:${aiMode}` : tab;
+  const result = resultsByKey[resultKey] || null;
+  const setResultForKey = (data) =>
+    setResultsByKey((prev) => ({ ...prev, [resultKey]: data }));
 
   useEffect(() => {
     fetch("/ai/status")
@@ -32,10 +34,10 @@ export default function App() {
 
   async function runSimple(endpoint) {
     setLoading(true);
-    setResultForTab(null);
+    setResultForKey(null);
     try {
       const r = await fetch(endpoint, { method: "POST" });
-      setResultForTab(await r.json());
+      setResultForKey(await r.json());
     } finally {
       setLoading(false);
     }
@@ -83,13 +85,13 @@ export default function App() {
                 : "Ollama not detected \u2014 structure-based generation will be used"}
             </span>
           </div>
-          <AIGenerateInput onRun={(data) => setResultForTab(data)} />
+          <AIGenerateInput onRun={(data) => setResultForKey(data)} onModeChange={setAiMode} initialMode={aiMode} />
         </div>
       )}
 
       {tab === "upload" && (
         <div className="mb-6">
-          <UploadTab onRun={(data) => setResultForTab(data)} />
+          <UploadTab onRun={(data) => setResultForKey(data)} />
         </div>
       )}
 
