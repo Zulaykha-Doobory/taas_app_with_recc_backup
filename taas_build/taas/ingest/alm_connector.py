@@ -65,18 +65,62 @@ def classify_input(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _split_criteria(text: str) -> List[str]:
-    """Pull bullet-like acceptance criteria out of a description blob."""
+    """
+    Pull acceptance criteria out of a description blob. Handles several common
+    formats: bullet points, Given/When/Then, and "AC 1 / AC1 / Criterion N"
+    rows (including ones pasted from a table).
+    """
     if not text:
         return []
     lines = re.split(r"[\n\r]+", text)
     out = []
     for ln in lines:
-        s = ln.strip(" \t-*•·>")
-        # keep lines that look like criteria (Given/When/Then, "should", "must")
-        if s and (re.match(r"(?i)(given|when|then|and|should|must|verify|ensure)\b", s)
-                  or ln.strip().startswith(("-", "*", "•"))):
+        s = ln.strip(" \t-*•·>|")
+        if not s:
+            continue
+        # Strip a leading "AC 1", "AC1:", "AC-1 -", "1.", "Criterion 3:" label
+        # so the criterion text itself is what we keep.
+        s = re.sub(r"(?i)^(ac[\s\-]?\d+|criterion\s*\d+|\d+)[\s:.\-]+", "", s).strip()
+        if not s:
+            continue
+        looks_like_criterion = (
+            re.match(r"(?i)(given|when|then|and|should|must|verify|ensure|the\s|if\s|initial|availability|https?|responsive|error|consistent|user|system)\b", s)
+            or ln.strip().startswith(("-", "*", "•"))
+            # an "AC N" row even if the wording doesn't start with a keyword
+            or re.match(r"(?i)^ac[\s\-]?\d+", ln.strip())
+        )
+        # Avoid keeping table headers like "ID" / "Criterion"
+        if s.lower() in ("id", "criterion", "criteria", "acceptance criteria"):
+            continue
+        if looks_like_criterion and len(s) > 6:
             out.append(s)
     return out[:30]
+
+
+# Criteria that a browser/Selenium test cannot meaningfully verify, so we can
+# flag them rather than silently dropping or faking a test.
+_NON_BROWSER_PATTERNS = (
+    (r"(?i)\b(load time|time to interactive|within .*seconds|performance|latency|4g|3g)\b",
+     "performance"),
+    (r"(?i)\b(uptime|availability|99\.\d|sla|dyno|provision|sleep state)\b",
+     "infrastructure"),
+    (r"(?i)\b(responsive|mobile|tablet|desktop|viewport|screen size|breakpoint)\b",
+     "responsive design"),
+    (r"(?i)\b(database|persist|data integrity|backend service|stack trace)\b",
+     "backend/data"),
+)
+
+
+def classify_testability(criterion: str) -> str:
+    """
+    Return 'browser' if a Selenium test can meaningfully check this criterion,
+    otherwise a short label for why it needs a different testing approach
+    (performance, infrastructure, responsive design, backend/data).
+    """
+    for pattern, label in _NON_BROWSER_PATTERNS:
+        if re.search(pattern, criterion):
+            return label
+    return "browser"
 
 
 def _extract_constraints(text: str) -> List[str]:

@@ -1372,6 +1372,7 @@ def ai_generate_from_requirement(req: RequirementReq):
         "covered": gap.get("covered", []),
         "gaps": gap.get("gaps", []),
         "gap_analyzed_by": gap.get("analyzed_by"),
+        "flagged": gap.get("flagged", []),
         "read_via": page_struct.get("read_via", "fetch"),
         "test_count": len(all_cases),
     })

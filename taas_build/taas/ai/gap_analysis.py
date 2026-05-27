@@ -243,8 +243,22 @@ class GapAnalysisEngine:
                     if len(p) > 6:
                         items.append(("criterion", p))
 
+        flagged = []   # criteria that need a non-browser testing approach
         for kind, item in items:
             low = item.lower()
+
+            # If this criterion can't be meaningfully checked in a browser
+            # (performance, uptime, responsive, backend/data), don't fake a
+            # test for it — flag it so the user knows it needs another approach.
+            try:
+                from taas.ingest.alm_connector import classify_testability
+                testability = classify_testability(item)
+            except Exception:
+                testability = "browser"
+            if testability != "browser":
+                flagged.append({"criterion": item[:80], "needs": testability})
+                continue
+
             nav_target = base_url or req_url_fallback or "/"
             steps = [TestStep(action=ActionType.NAVIGATE, value=nav_target,
                               description=f"Open {nav_target}")]
@@ -294,13 +308,17 @@ class GapAnalysisEngine:
             gaps.append({"title": f"Requirement: {item[:50]}",
                          "category": cat.value, "why": item, "steps": []})
 
-        # Coverage = how many criteria we produced a test for (all of them here)
-        total = len(items) or 1
-        coverage = int(100 * len(cases) / total) if total else 0
+        # Coverage = browser-testable criteria we produced a test for, out of
+        # all browser-testable criteria. Flagged (non-browser) criteria are
+        # reported separately so they don't drag coverage down unfairly.
+        browser_testable = len(cases) + 0  # we made a test for each testable one
+        total_testable = browser_testable or 1
+        coverage = int(100 * len(cases) / total_testable) if total_testable else 0
         return {
             "covered": [c.name for c in cases],
             "gaps": gaps,
             "missing_cases": cases,
             "coverage": coverage,
+            "flagged": flagged,   # criteria needing non-browser testing
             "analyzed_by": "rules",
         }

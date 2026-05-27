@@ -155,6 +155,27 @@ export default function App() {
 
           {result.note && <p className="text-xs text-[#fbbf24] mb-3">{result.note}</p>}
 
+          {result.flagged && result.flagged.length > 0 && (
+            <div className="mb-4 rounded-lg bg-[#1c1c26] border border-[#3d3d4f] p-3">
+              <div className="text-sm font-medium text-[#f2f2f5] mb-2">
+                Criteria needing other testing approaches ({result.flagged.length})
+              </div>
+              <div className="flex flex-col gap-1.5">
+                {result.flagged.map((f, i) => (
+                  <div key={i} className="text-xs text-[#cfcfda] flex gap-2">
+                    <span className="text-[#fbbf24] whitespace-nowrap">⚠ {f.needs}</span>
+                    <span className="text-[#9a9aac]">{f.criterion}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] text-[#9a9aac] mt-2">
+                These can't be verified by a browser test (e.g. performance,
+                uptime, responsive layout, backend data) and need a different
+                testing approach.
+              </p>
+            </div>
+          )}
+
           <div className="flex flex-col gap-2">
             {(result.cases || []).map((t, i) => (
               <TestRow key={i} test={t} runId={result.run_id} videoPath={result.video_path} />
