@@ -569,7 +569,15 @@ def ai_generate_and_run(req: AiGenerateReq):
             "hint": "Try a page with a form, login, or buttons.",
         })
 
-    SeleniumTranslator().render_suite(suite)
+    try:
+        SeleniumTranslator().render_suite(suite)
+    except Exception as e:
+        # Don't 500 on a translation hiccup (e.g. an odd AI-generated step on a
+        # complex page) — surface a clear message and stop gracefully.
+        raise HTTPException(status_code=422, detail={
+            "message": f"Could not build runnable tests for that page: {str(e)[:160]}",
+            "hint": "This can happen on very complex pages. Try a more specific URL.",
+        })
     run_id = _uuid.uuid4().hex[:8]
 
     want_browser = req.record_mode in ("browser", "both")
@@ -1200,8 +1208,14 @@ class _BugReports:
     def __init__(self, output_dir="./output"):
         self.dir = _Path(output_dir); self.dir.mkdir(parents=True, exist_ok=True)
     def create(self, test_name, failure_reason, expected, actual, video_path=None, run_id=None):
+        import re as _re
+        # Build a readable id, but sanitise it for use as a filename: Windows
+        # forbids : \ / * ? " < > | and rejects non-ASCII like the ellipsis.
+        raw_name = (test_name or "test").replace(" ", "_").lower()
+        bug_id = f"BUG-{run_id}-{raw_name}"
+        safe_name = _re.sub(r'[^A-Za-z0-9._-]', "", bug_id)[:120] or f"BUG-{run_id}"
         r = {
-            "id": f"BUG-{run_id}-{(test_name or 'test').replace(' ', '_').lower()}",
+            "id": bug_id,
             "test_name": test_name, "timestamp": _dt.now().isoformat(), "status": "NEW",
             "title": f"[AUTOMATED] {test_name} failed: {failure_reason}",
             "failure_reason": failure_reason, "expected": expected, "actual": actual,
@@ -1209,12 +1223,13 @@ class _BugReports:
             "artifacts": {"video": f"./recordings/{_Path(video_path).name}" if video_path else None},
             "jira_issue_key": None,
         }
-        with open(self.dir / f"{r['id']}.json", "w") as f: _json.dump(r, f, indent=2)
+        with open(self.dir / f"{safe_name}.json", "w", encoding="utf-8") as f:
+            _json.dump(r, f, indent=2)
         return r
     def list(self, run_id):
         out = []
         for fp in self.dir.glob(f"BUG-{run_id}-*.json"):
-            with open(fp) as f: out.append(_json.load(f))
+            with open(fp, encoding="utf-8") as f: out.append(_json.load(f))
         return out
 
 _recorder = _ScreenRecorder()

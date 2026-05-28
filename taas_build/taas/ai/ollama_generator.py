@@ -199,10 +199,20 @@ def _parse_llm_response(raw: str, source: str) -> List[TestCase]:
         for s in item.get("steps", []):
             loc = s.get("locator")
             locator = Locator(**loc) if isinstance(loc, dict) and loc else None
+            try:
+                action = ActionType(s["action"])
+            except (ValueError, KeyError):
+                action = ActionType.ASSERT_VISIBLE
+            sval = s.get("value")
+            # An assert_text with no value fails validation — downgrade it.
+            if action == ActionType.ASSERT_TEXT and not (sval and str(sval).strip()):
+                action = ActionType.ASSERT_VISIBLE
+                locator = locator or Locator(strategy="css", value="body")
+                sval = None
             steps.append(TestStep(
-                action=ActionType(s["action"]),
+                action=action,
                 locator=locator,
-                value=s.get("value"),
+                value=sval,
                 description=s.get("description"),
             ))
         item["steps"] = steps

@@ -274,11 +274,16 @@ class SmartURLGenerator:
         # 1. Always: page loads and a heading/landmark is present
         load_steps = [TestStep(action=ActionType.NAVIGATE, value=url,
                                description=f"Open {url}")]
-        if struct["headings"]:
+        first_heading = ""
+        for h in (struct.get("headings") or []):
+            if h and str(h).strip():
+                first_heading = str(h).strip()[:40]
+                break
+        if first_heading:
             load_steps.append(TestStep(
                 action=ActionType.ASSERT_TEXT,
                 locator=Locator(strategy="css", value="body"),
-                value=struct["headings"][0][:40],
+                value=first_heading,
                 description="Page shows its main heading"))
         else:
             load_steps.append(TestStep(

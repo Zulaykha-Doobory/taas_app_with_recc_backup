@@ -17,12 +17,21 @@ const MODES = [
 ];
 
 export default function AIGenerateInput({ onRun, onModeChange, initialMode = "url" }) {
-  const [url, setUrl] = useState("https://the-internet.herokuapp.com/login");
+  const DEFAULT_URL = "https://the-internet.herokuapp.com/login";
+  // Each mode keeps its own URL so they don't overwrite each other.
+  const [urlByMode, setUrlByMode] = useState({
+    url: DEFAULT_URL, text: DEFAULT_URL, jira: DEFAULT_URL, azure: DEFAULT_URL,
+  });
   const [mode, setMode] = useState(initialMode);
-  const [requirement, setRequirement] = useState("");
+  const [reqByMode, setReqByMode] = useState({ text: "", jira: "", azure: "" });
   const [recordMode, setRecordMode] = useState("browser");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
+
+  const url = urlByMode[mode] ?? DEFAULT_URL;
+  const setUrl = (v) => setUrlByMode((prev) => ({ ...prev, [mode]: v }));
+  const requirement = reqByMode[mode] ?? "";
+  const setRequirement = (v) => setReqByMode((prev) => ({ ...prev, [mode]: v }));
 
   const active = MODES.find((m) => m.id === mode);
   const needsRequirement = mode !== "url";
